@@ -5,10 +5,8 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 
 export default async function Home() {
-  // ✅ ADDED: Check if user is logged in
+
   const session = await getServerSession(authOptions);
-  
-  // ✅ ADDED: Determine where "Deploy a site" button should go
   const deployLink = session ? "/dashboard" : "/login";
 
   return (

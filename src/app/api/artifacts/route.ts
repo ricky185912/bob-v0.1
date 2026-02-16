@@ -1,44 +1,108 @@
-// app/api/artifacts/route.ts - COMPLETE
+//src/app/api/artifacts/route.ts
 import { sql } from "@/lib/db";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase";
 import AdmZip from 'adm-zip';
-import path from 'path';
 
-export async function POST(req: Request) {
+// Maximum file size: 50MB
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+// Maximum number of files in a ZIP
+const MAX_FILES = 1000;
+// Maximum total extracted size: 100MB
+const MAX_EXTRACTED_SIZE = 100 * 1024 * 1024;
+
+// Allowed file extensions for security
+const ALLOWED_EXTENSIONS = new Set([
+  // HTML
+  'html', 'htm',
+  // CSS
+  'css',
+  // JavaScript
+  'js', 'mjs', 'cjs',
+  // Images
+  'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp', 'tiff',
+  // Fonts
+  'woff', 'woff2', 'ttf', 'otf', 'eot',
+  // Data
+  'json', 'xml', 'csv', 'txt', 'md',
+  // Media
+  'mp4', 'webm', 'mp3', 'wav', 'ogg', 'm4a',
+  // Documents
+  'pdf',
+  // Web files
+  'webmanifest', 'map'
+]);
+
+interface FileEntry {
+  path: string;
+  data: Buffer;
+  contentType: string;
+  size: number;
+}
+
+interface ArtifactRecord {
+  id: string;
+  hash: string;
+  size: number;
+  file_count: number;
+  created_at: string;
+}
+
+export async function POST(request: Request): Promise<Response> {
+  const log: string[] = [];
+  
   try {
-    console.log("=== ARTIFACT CREATION START ===");
+    log.push("=== ARTIFACT CREATION START ===");
+    
     const session = await getServerSession(authOptions);
     
     if (!session?.user?.id) {
-      console.log("❌ No session");
+      log.push("❌ No session");
       return Response.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    console.log("User ID:", session.user.id);
+    log.push(`User ID: ${session.user.id}`);
 
-    const formData = await req.formData();
-    const zipFile = formData.get('zip') as File;
-    const hash = formData.get('hash') as string;
-    
-    console.log("Zip file received:", zipFile?.name, zipFile?.size);
-    console.log("Hash received:", hash);
+    const formData = await request.formData();
+    const zipFile = formData.get('zip') as File | null;
+    const hash = formData.get('hash') as string | null;
     
     if (!zipFile || !hash) {
-      console.log("❌ Missing file or hash");
+      log.push("❌ Missing file or hash");
       return Response.json({ 
         error: "ZIP file and hash are required" 
       }, { status: 400 });
     }
+    
+    // Validate file size
+    if (zipFile.size > MAX_FILE_SIZE) {
+      log.push(`❌ File too large: ${zipFile.size} bytes (max: ${MAX_FILE_SIZE})`);
+      return Response.json({ 
+        error: `File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB` 
+      }, { status: 400 });
+    }
+    
+    log.push(`Zip file: ${zipFile.name} (${zipFile.size} bytes)`);
+    log.push(`Hash received: ${hash}`);
+    
+    // Validate hash format (SHA256 hex)
+    const hashRegex = /^[a-f0-9]{64}$/i;
+    if (!hashRegex.test(hash)) {
+      log.push("❌ Invalid hash format");
+      return Response.json({ 
+        error: "Invalid hash format. Must be SHA256 hex string" 
+      }, { status: 400 });
+    }
 
     // Check if artifact already exists
-    const existing = await sql`
+    const existing = await sql<Pick<ArtifactRecord, 'id'>[]>`
       SELECT id FROM artifacts WHERE hash = ${hash}
     `;
     
     if (existing.length > 0) {
-      console.log("✓ Artifact already exists");
+      log.push("✓ Artifact already exists");
+      console.log(log.join('\n'));
       return Response.json({
         success: true,
         artifactId: existing[0].id,
@@ -49,15 +113,15 @@ export async function POST(req: Request) {
     // Convert File to Buffer
     const bytes = await zipFile.arrayBuffer();
     const buffer = Buffer.from(bytes);
-    console.log("Buffer size:", buffer.length);
+    log.push(`Buffer size: ${buffer.length} bytes`);
     
     // Verify hash matches
     const crypto = await import('crypto');
     const computedHash = crypto.createHash('sha256').update(buffer).digest('hex');
-    console.log("Computed hash:", computedHash);
-    console.log("Provided hash:", hash);
+    log.push(`Computed hash: ${computedHash}`);
     
     if (computedHash !== hash) {
+      log.push("❌ Hash mismatch");
       throw new Error(`Hash mismatch. Computed: ${computedHash}, Provided: ${hash}`);
     }
     
@@ -65,159 +129,294 @@ export async function POST(req: Request) {
     const zip = new AdmZip(buffer);
     const entries = zip.getEntries();
     
-    console.log(`ZIP has ${entries.length} entries`);
+    log.push(`ZIP has ${entries.length} entries`);
+    
+    if (entries.length === 0) {
+      log.push("❌ ZIP file is empty");
+      throw new Error("ZIP file is empty");
+    }
+    
+    if (entries.length > MAX_FILES) {
+      log.push(`❌ Too many files: ${entries.length} (max: ${MAX_FILES})`);
+      throw new Error(`Too many files. Maximum is ${MAX_FILES} files`);
+    }
     
     // Find all files and detect root folder
-    const files: Array<{ path: string; data: Buffer; contentType: string }> = [];
-    let hasIndexHtml = false;
-    let rootFolder = null;
+    const files: FileEntry[] = [];
     
-    // First: Analyze structure
+    let hasIndexHtml = false;
+    let rootFolder: string | null = null;
+    let totalExtractedSize = 0;
+    let indexHtmlPath: string | null = null;
+    
+    // First pass: Analyze structure and validate
     for (const entry of entries) {
       if (!entry.isDirectory) {
         const entryPath = entry.entryName.replace(/\\/g, '/');
-        const pathParts = entryPath.split('/');
         
+        // Skip macOS __MACOSX folders
+        if (entryPath.includes('__MACOSX/') || entryPath.includes('.DS_Store')) {
+          continue;
+        }
+        
+        // Validate file extension
+        const extension = entryPath.split('.').pop()?.toLowerCase();
+        if (extension && !ALLOWED_EXTENSIONS.has(extension)) {
+          log.push(`⚠️ Skipping disallowed file type: ${entryPath}`);
+          continue;
+        }
+        
+        // Check for potential path traversal
+        if (entryPath.includes('..') || entryPath.includes('//')) {
+          log.push(`⚠️ Skipping suspicious path: ${entryPath}`);
+          continue;
+        }
+        
+        // Detect root folder
+        const pathParts = entryPath.split('/');
         if (pathParts.length > 1 && !rootFolder) {
-          rootFolder = pathParts[0];
-          console.log(`Detected root folder: "${rootFolder}"`);
+          const firstPart = pathParts[0];
+          // Ensure it's a valid folder name
+          if (firstPart && !firstPart.includes('.')) {
+            rootFolder = firstPart;
+          }
+        }
+        
+        // Check for index.html
+        const normalizedPath = entryPath.toLowerCase();
+        if (normalizedPath === 'index.html' || normalizedPath.endsWith('/index.html')) {
+          hasIndexHtml = true;
+          indexHtmlPath = entryPath;
         }
       }
     }
     
-    // Second: Extract files
+    if (rootFolder) {
+      log.push(`Detected root folder: "${rootFolder}"`);
+    }
+    
+    // Second pass: Extract files
     for (const entry of entries) {
       if (!entry.isDirectory) {
         let entryPath = entry.entryName.replace(/\\/g, '/');
+        
+        // Skip macOS metadata
+        if (entryPath.includes('__MACOSX/') || entryPath.includes('.DS_Store')) {
+          continue;
+        }
         
         // Strip root folder if present
         if (rootFolder && entryPath.startsWith(`${rootFolder}/`)) {
           entryPath = entryPath.substring(rootFolder.length + 1);
         }
         
-        if (!entryPath || entryPath === '') continue;
-        
-        // Check for index.html
-        if (entryPath.toLowerCase() === 'index.html') {
-          hasIndexHtml = true;
-          console.log(`✓ Found index.html: ${entryPath}`);
+        if (!entryPath || entryPath === '') {
+          continue;
         }
         
+        // Get file data
         let fileData = entry.getData();
+        const fileSize = fileData.length;
         
-        // AUTO-FIX HTML: Add base tag for proper path resolution
-        // This will be overridden during serving, but good fallback
-        if (entryPath.toLowerCase().endsWith('.html')) {
+        // Check size limits
+        totalExtractedSize += fileSize;
+        if (totalExtractedSize > MAX_EXTRACTED_SIZE) {
+          log.push(`❌ Total extracted size too large: ${totalExtractedSize} bytes`);
+          throw new Error(`Total extracted size exceeds limit of ${MAX_EXTRACTED_SIZE / 1024 / 1024}MB`);
+        }
+        
+        // Determine content type
+        const contentType = getContentType(entryPath);
+        
+        // For HTML files, ensure charset is set
+        if (contentType === 'text/html') {
           const htmlContent = fileData.toString('utf-8');
           
-          // Add base tag with / so it works during serving rewrite
-          if (!htmlContent.includes('<base')) {
-            const fixedHtml = htmlContent.replace(
-              /<head>/i,
-              '<head>\n<base href="/">'
-            );
-            fileData = Buffer.from(fixedHtml, 'utf-8');
-            console.log(`  Added temporary base tag to: ${entryPath}`);
+          // Basic HTML validation
+          if (!htmlContent.trim().startsWith('<!DOCTYPE html') && 
+              !htmlContent.includes('<html') && 
+              !htmlContent.includes('<head>')) {
+            log.push(`⚠️ HTML file missing doctype/head: ${entryPath}`);
           }
+          
+          fileData = Buffer.from(htmlContent, 'utf-8');
         }
         
-        const contentType = getContentType(entryPath);
         files.push({
           path: entryPath,
           data: fileData,
-          contentType
+          contentType,
+          size: fileSize
         });
         
-        console.log(`  File: ${entryPath} (${fileData.length} bytes)`);
+        log.push(`  File: ${entryPath} (${fileSize} bytes, ${contentType})`);
       }
+    }
+    
+    if (files.length === 0) {
+      log.push("❌ No valid files found in ZIP");
+      throw new Error("No valid files found in ZIP");
     }
     
     if (!hasIndexHtml) {
-      console.log("❌ No index.html found");
-      throw new Error("ZIP must contain an index.html file");
+      log.push("❌ No index.html found in the ZIP");
+      log.push(`Files found: ${files.map(f => f.path).join(', ')}`);
+      return Response.json({ 
+        error: "ZIP must contain an index.html file at the root or in a subdirectory",
+        filesFound: files.map(f => f.path)
+      }, { status: 400 });
     }
     
-    console.log(`Extracted ${files.length} files`);
+    log.push(`✅ Found index.html at: ${indexHtmlPath}`);
+    log.push(`📦 Extracted ${files.length} files (${totalExtractedSize} bytes total)`);
     
-    // Upload files
-    console.log("Uploading to Supabase Storage...");
+    // Upload files to Supabase Storage
+    log.push("Uploading to Supabase Storage...");
     let uploadedCount = 0;
+    const uploadErrors: string[] = [];
     
-    for (const file of files) {
-      try {
-        const storagePath = `${hash}/${file.path}`;
-        
-        const { error } = await supabaseAdmin.storage
-          .from('artifacts')
-          .upload(storagePath, file.data, {
-            contentType: file.contentType,
-            cacheControl: 'public, max-age=31536000, immutable',
-            upsert: false
-          });
-        
-        if (error) {
-          if (error.message?.includes('already exists')) {
-            console.log(`  Skipped (exists): ${storagePath}`);
-            uploadedCount++;
+    // Upload files in parallel batches (max 5 at a time)
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < files.length; i += BATCH_SIZE) {
+      const batch = files.slice(i, i + BATCH_SIZE);
+      const uploadPromises = batch.map(async (file) => {
+        try {
+          const storagePath = `${hash}/${file.path}`;
+          
+          const { error: uploadError } = await supabaseAdmin.storage
+            .from('artifacts')
+            .upload(storagePath, file.data, {
+              contentType: file.contentType,
+              cacheControl: 'public, max-age=31536000, immutable',
+              upsert: false
+            });
+          
+          if (uploadError) {
+            if (uploadError.message?.includes('already exists')) {
+              log.push(`  ⚠️ Already exists: ${file.path}`);
+              uploadedCount++;
+            } else {
+              throw uploadError;
+            }
           } else {
-            throw error;
+            uploadedCount++;
+            log.push(`  ✅ Uploaded: ${file.path}`);
           }
-        } else {
-          uploadedCount++;
-          console.log(`  ✓ Uploaded: ${storagePath}`);
+        } catch (uploadError: unknown) {
+          const errorMessage = uploadError instanceof Error 
+            ? uploadError.message 
+            : 'Unknown upload error';
+          uploadErrors.push(`${file.path}: ${errorMessage}`);
+          log.push(`  ❌ Failed: ${file.path} - ${errorMessage}`);
         }
-      } catch (error: any) {
-        console.log(`  ✗ Failed: ${error.message}`);
-        throw error;
-      }
+      });
+      
+      await Promise.all(uploadPromises);
     }
     
-    console.log(`✓ Uploaded ${uploadedCount} files`);
+    if (uploadErrors.length > 0) {
+      log.push(`⚠️ Some files failed to upload: ${uploadErrors.length} errors`);
+    }
     
-    // Create DB record
-    const [artifact] = await sql`
+    if (uploadedCount === 0) {
+      log.push("❌ No files were uploaded");
+      throw new Error("Failed to upload any files to storage");
+    }
+    
+    log.push(`✅ Uploaded ${uploadedCount}/${files.length} files`);
+    
+    // Create database record
+    const [artifact] = await sql<ArtifactRecord[]>`
       INSERT INTO artifacts (hash, size, file_count)
       VALUES (${hash}, ${buffer.length}, ${uploadedCount})
       RETURNING id, hash, size, file_count, created_at
     `;
 
-    console.log("✓ Artifact created:", artifact.id);
-    console.log("=== ARTIFACT CREATION END ===");
-
+    log.push(`✅ Artifact created: ${artifact.id}`);
+    log.push("=== ARTIFACT CREATION END ===");
+    
+    console.log(log.join('\n'));
+    
     return Response.json({ 
       success: true, 
-      artifact 
+      artifact,
+      summary: {
+        files: uploadedCount,
+        totalSize: totalExtractedSize,
+        indexHtmlPath
+      }
     }, { status: 201 });
 
   } catch (error: unknown) {
-    console.error("❌ Artifact creation error:", error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    log.push(`❌ Artifact creation error: ${errorMessage}`);
+    console.error(log.join('\n'));
+    
     return Response.json({
       success: false,
       error: errorMessage,
+      logs: process.env.NODE_ENV === 'development' ? log : undefined
     }, { status: 500 });
   }
 }
 
+// Helper function to determine content type
 function getContentType(filePath: string): string {
-  const ext = path.extname(filePath).toLowerCase();
+  const extension = filePath.split('.').pop()?.toLowerCase() || '';
+  
   const contentTypes: Record<string, string> = {
-    '.html': 'text/html', '.htm': 'text/html',
-    '.css': 'text/css',
-    '.js': 'application/javascript',
-    '.json': 'application/json',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.svg': 'image/svg+xml',
-    '.ico': 'image/x-icon',
-    '.webp': 'image/webp',
-    '.txt': 'text/plain',
-    '.woff': 'font/woff', '.woff2': 'font/woff2',
-    '.ttf': 'font/ttf',
-    '.mp4': 'video/mp4', '.webm': 'video/webm',
-    '.mp3': 'audio/mpeg',
-    '.pdf': 'application/pdf',
+    // HTML
+    html: 'text/html',
+    htm: 'text/html',
+    
+    // CSS
+    css: 'text/css',
+    
+    // JavaScript
+    js: 'application/javascript',
+    mjs: 'application/javascript',
+    cjs: 'application/javascript',
+    
+    // Images
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    svg: 'image/svg+xml',
+    webp: 'image/webp',
+    ico: 'image/x-icon',
+    bmp: 'image/bmp',
+    tiff: 'image/tiff',
+    
+    // Fonts
+    woff: 'font/woff',
+    woff2: 'font/woff2',
+    ttf: 'font/ttf',
+    otf: 'font/otf',
+    eot: 'application/vnd.ms-fontobject',
+    
+    // Data
+    json: 'application/json',
+    xml: 'application/xml',
+    csv: 'text/csv',
+    txt: 'text/plain',
+    md: 'text/markdown',
+    
+    // Media
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    ogg: 'audio/ogg',
+    m4a: 'audio/mp4',
+    
+    // Documents
+    pdf: 'application/pdf',
+    
+    // Web files
+    webmanifest: 'application/manifest+json',
+    map: 'application/json'
   };
-  return contentTypes[ext] || 'application/octet-stream';
+  
+  return contentTypes[extension] || 'application/octet-stream';
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Package, Link2, Download, Hash, Clock, CheckCircle2, Trash2, Trash, X, AlertCircle } from "lucide-react";
+import { Package, Link2, Hash, Clock, CheckCircle2, Trash2, Trash, X, AlertCircle, Archive } from "lucide-react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
 
@@ -12,6 +12,19 @@ interface Deployment {
   url: string;
   createdAt: string;
   status: "QUEUED" | "READY" | "FAILED";
+  displayName?: string;
+}
+
+interface ApiDeployment {
+  id: string;
+  url: string;
+  status: string;
+  created_at: string;
+  hash: string;
+  size: number;
+  file_count: number;
+  access_url: string;
+  display_name: string;
 }
 
 export default function DeploymentsPage() {
@@ -33,13 +46,15 @@ export default function DeploymentsPage() {
       
       if (data.success) {
         setDeployments(
-          data.deployments?.map((d: any) => ({
+          data.deployments?.map((d: ApiDeployment) => ({
             id: d.id,
-            projectName: d.url,
+            projectName: d.display_name || d.url.replace('.bob', ''),
             hash: d.hash,
-            url: `http://localhost:3000/${d.url.replace('.bob', '')}`, // Updated for local
+            // FIXED: Use access_url from API which is /deploy/site-name.bob
+            url: `http://localhost:3000${d.access_url}`,
             createdAt: d.created_at,
             status: d.status,
+            displayName: d.display_name,
           })) || []
         );
       }
@@ -56,26 +71,29 @@ export default function DeploymentsPage() {
   };
 
   const handleMoveToBin = async () => {
-    if (!deploymentToDelete) return;
+  if (!deploymentToDelete) return;
+  
+  setDeletingId(deploymentToDelete.id);
+  try {
+    const res = await fetch(`/api/deployments/${deploymentToDelete.id}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ action: 'soft-delete' }),
+    });
     
-    setDeletingId(deploymentToDelete.id);
-    try {
-      // TODO: Implement move to bin API
-      // await fetch(`/api/deployments/${deploymentToDelete.id}/bin`, { method: 'POST' });
-      
-      // For now, just remove from UI
+    if (res.ok) {
       setDeployments(prev => prev.filter(d => d.id !== deploymentToDelete.id));
-      
-      // Show success feedback
-      console.log(`Moved "${deploymentToDelete.projectName}" to bin`);
-    } catch (error) {
-      console.error("Failed to move to bin:", error);
-    } finally {
-      setDeletingId(null);
-      setShowDeleteModal(false);
-      setDeploymentToDelete(null);
     }
-  };
+  } catch (error) {
+    console.error("Failed to move to bin:", error);
+  } finally {
+    setDeletingId(null);
+    setShowDeleteModal(false);
+    setDeploymentToDelete(null);
+  }
+};
 
   const handleDeletePermanently = async () => {
     if (!deploymentToDelete) return;
@@ -88,7 +106,6 @@ export default function DeploymentsPage() {
       // For now, just remove from UI
       setDeployments(prev => prev.filter(d => d.id !== deploymentToDelete.id));
       
-      // Show success feedback
       console.log(`Permanently deleted "${deploymentToDelete.projectName}"`);
     } catch (error) {
       console.error("Failed to delete:", error);
@@ -122,6 +139,12 @@ export default function DeploymentsPage() {
             All your immutable deployments. Each has a permanent URL.
           </p>
         </div>
+        <Link
+          href="/bin"
+          className="flex items-center gap-2 px-6 py-3 bg-zinc-900/50 hover:bg-zinc-800/50 border border-zinc-700/50 rounded-xl transition-all glow group">
+          <Archive className="w-4 h-4 text-zinc-400 group-hover:text-orange-400 transition-colors" />
+          <span className="text-zinc-400 group-hover:text-orange-400 transition-colors">Bin</span>
+        </Link>
 
         <div className="grid gap-6">
           {deployments.length === 0 ? (
@@ -188,6 +211,8 @@ export default function DeploymentsPage() {
                       className="p-3 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-xl transition-all group-hover:scale-105 glow disabled:opacity-50 disabled:cursor-not-allowed"
                       onClick={() => handleDeleteClick(deployment)}
                       disabled={deletingId === deployment.id}
+                      aria-label="Delete deployment"
+                      type="button"
                     >
                       {deletingId === deployment.id ? (
                         <div className="w-4 h-4 border-2 border-red-400/30 border-t-red-400 rounded-full animate-spin" />
@@ -223,6 +248,8 @@ export default function DeploymentsPage() {
                   setDeploymentToDelete(null);
                 }}
                 className="p-2 hover:bg-zinc-800/50 rounded-xl transition-colors"
+                aria-label="Close"
+                type="button"
               >
                 <X className="w-5 h-5 text-zinc-400" />
               </button>
@@ -237,6 +264,7 @@ export default function DeploymentsPage() {
                 onClick={handleMoveToBin}
                 disabled={deletingId === deploymentToDelete.id}
                 className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-zinc-800/50 hover:bg-zinc-700/50 border border-zinc-700/50 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                type="button"
               >
                 <Trash className="w-4 h-4 text-zinc-400" />
                 Move to Bin
@@ -247,6 +275,7 @@ export default function DeploymentsPage() {
                 onClick={handleDeletePermanently}
                 disabled={deletingId === deploymentToDelete.id}
                 className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                type="button"
               >
                 {deletingId === deploymentToDelete.id ? (
                   <>

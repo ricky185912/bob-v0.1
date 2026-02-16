@@ -9,7 +9,6 @@ body {
   background-color: #000;
 }
 
-/* Your original styles - UNCHANGED */
 .glow {
   box-shadow: 0 0 60px rgba(255, 115, 0, 0.15);
 }
@@ -27,7 +26,6 @@ body {
   @apply rounded-2xl border border-zinc-800 bg-zinc-950 p-6;
 }
 
-/* Your Bob animations - UNCHANGED */
 .bob-core {
   position: absolute;
   inset: 0;

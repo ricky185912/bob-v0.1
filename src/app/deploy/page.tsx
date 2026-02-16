@@ -41,8 +41,8 @@ export default function DeployPage() {
       
       // Use FormData to send the file
       const formData = new FormData();
-      formData.append('zip', file); // Actual ZIP file
-      formData.append('hash', hash); // Hash for deduplication
+      formData.append('zip', file);
+      formData.append('hash', hash);
 
       console.log("Uploading artifact with hash:", hash.substring(0, 16));
 
@@ -58,7 +58,6 @@ export default function DeployPage() {
         throw new Error(artifactData.error || "Failed to create artifact");
       }
 
-      // FIXED: Get artifact ID correctly
       const artifactId = artifactData.artifact?.id || artifactData.artifactId;
       
       if (!artifactId) {
@@ -87,16 +86,22 @@ export default function DeployPage() {
       console.log("Deployment response:", deploymentData);
       
       if (deploymentData.success) {
+        // FIXED: Use access_url from API response which is /deploy/project-name.bob
         setResult({
           hash: hash.substring(0, 16),
-          url: `http://localhost:3000/${projectName}`,
+          url: deploymentData.accessUrl || `http://localhost:3000/deploy/${projectName}.bob`,
         });
+        
+        // Clear form on success
+        setFile(null);
+        setProjectName("");
       } else {
         setResult({ error: deploymentData.error || "Deployment failed" });
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Upload error:", error);
-      setResult({ error: error.message || "Upload failed" });
+      const errorMessage = error instanceof Error ? error.message : "Upload failed";
+      setResult({ error: errorMessage });
     } finally {
       setUploading(false);
     }
