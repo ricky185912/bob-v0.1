@@ -1,14 +1,4 @@
-// src/server/db.ts
-import { PrismaClient } from "@prisma/client";
+// src/server/db.ts - Neon serverless Postgres
+import { neon } from '@neondatabase/serverless';
 
-const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined;
-};
-
-export const db = globalForPrisma.prisma ?? new PrismaClient({
-  log: ["error"],
-});
-
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = db;
-}
+export const db = neon(process.env.DATABASE_URL!);
