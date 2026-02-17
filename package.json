@@ -11,9 +11,8 @@
   "dependencies": {
     "@neondatabase/serverless": "^1.0.2",
     "@next-auth/prisma-adapter": "^1.0.7",
-    "@supabase/auth-helpers-nextjs": "^0.15.0",
     "@supabase/ssr": "^0.8.0",
-    "@supabase/supabase-js": "^2.95.3",
+    "@supabase/supabase-js": "^2.96.0",
     "adm-zip": "^0.5.16",
     "bcryptjs": "^3.0.3",
     "extract-zip": "^2.0.1",
