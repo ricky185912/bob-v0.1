@@ -89,7 +89,7 @@ export default function DeployPage() {
         // FIXED: Use access_url from API response which is /deploy/project-name.bob
         setResult({
           hash: hash.substring(0, 16),
-          url: deploymentData.accessUrl || `http://localhost:3000/deploy/${projectName}.bob`,
+          url: deploymentData.accessUrl || `/deploy/${projectName}.bob`,
         });
         
         // Clear form on success

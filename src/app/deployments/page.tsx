@@ -51,7 +51,7 @@ export default function DeploymentsPage() {
             projectName: d.display_name || d.url.replace('.bob', ''),
             hash: d.hash,
             // FIXED: Use access_url from API which is /deploy/site-name.bob
-            url: `http://localhost:3000${d.access_url}`,
+            url: d.access_url,
             createdAt: d.created_at,
             status: d.status,
             displayName: d.display_name,
